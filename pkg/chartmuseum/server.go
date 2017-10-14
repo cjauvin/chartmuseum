@@ -268,40 +268,35 @@ func (server *Server) updateIndexObject(index *repo.Index, object storage.Object
 func (server *Server) addIndexObjectsAsync(index *repo.Index, objects []storage.Object) error {
 	server.Logger.Debugw("Loading chart packages from storage (this could take awhile)")
 	var err error
-	numObjects := len(objects)
-	loaded := make([]*helm_repo.ChartVersion, numObjects)
-
+	cvChan := make(chan *helm_repo.ChartVersion)
+	// This must be called first
+	go func() {
+		for chartVersion := range cvChan {
+			server.Logger.Debugw("Adding chart to index",
+				"name", chartVersion.Name,
+				"version", chartVersion.Version,
+			)
+			index.AddEntry(chartVersion)
+		}
+	}()
 	var wg sync.WaitGroup
-	wg.Add(numObjects)
-	for idx, object := range objects {
-		go func(i int, o storage.Object) {
+	wg.Add(len(objects))
+	for _, object := range objects {
+		go func(o storage.Object) {
 			defer wg.Done()
 			if err == nil {
 				chartVersion, err := server.getObjectChartVersion(o, true)
 				if err != nil {
 					err = server.checkInvalidChartPackageError(o, err, "added")
 				} else {
-					loaded[i] = chartVersion
+					cvChan <- chartVersion
 				}
 			}
-		}(idx, object)
+		}(object)
 	}
 	wg.Wait()
-	if err != nil {
-		return err
-	}
-
-	for _, chartVersion := range loaded {
-		if chartVersion == nil {
-			continue
-		}
-		server.Logger.Debugw("Adding chart to index",
-			"name", chartVersion.Name,
-			"version", chartVersion.Version,
-		)
-		index.AddEntry(chartVersion)
-	}
-	return nil
+	close(cvChan)
+	return err
 }
 
 func (server *Server) getObjectChartVersion(object storage.Object, load bool) (*helm_repo.ChartVersion, error) {
