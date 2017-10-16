@@ -40,30 +40,25 @@ func (object Object) HasExtension(extension string) bool {
 // GetObjectSliceDiff takes two objects slices and returns an ObjectSliceDiff
 func GetObjectSliceDiff(os1 []Object, os2 []Object) ObjectSliceDiff {
 	var diff ObjectSliceDiff
+	ms1 := make(map[string]Object) // Path -> Object
+	ms2 := make(map[string]Object) // Path -> Object
 	for _, o1 := range os1 {
-		found := false
-		for _, o2 := range os2 {
-			if o1.Path == o2.Path {
-				found = true
-				if o1.LastModified != o2.LastModified {
-					diff.Updated = append(diff.Updated, o2)
-				}
-				break
+		ms1[o1.Path] = o1
+	}
+	for _, o2 := range os2 {
+		ms2[o2.Path] = o2
+	}
+	for _, o1 := range os1 {
+		if o2, ok := ms2[o1.Path]; ok {
+			if o1.LastModified != o2.LastModified {
+				diff.Updated = append(diff.Updated, o2)
 			}
-		}
-		if !found {
+		} else {
 			diff.Removed = append(diff.Removed, o1)
 		}
 	}
 	for _, o2 := range os2 {
-		found := false
-		for _, o1 := range os1 {
-			if o2.Path == o1.Path {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, ok := ms1[o2.Path]; !ok {
 			diff.Added = append(diff.Added, o2)
 		}
 	}
