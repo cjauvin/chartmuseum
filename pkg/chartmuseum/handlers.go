@@ -30,29 +30,35 @@ type (
 )
 
 func (server *Server) getIndexFileRequestHandler(c *gin.Context) {
-	err := server.syncRepositoryIndex()
-	if err != nil {
-		c.JSON(500, errorResponse(err))
-		return
+	if server.CacheRefreshPeriod == 0 {
+		err := server.syncRepositoryIndex()
+		if err != nil {
+			c.JSON(500, errorResponse(err))
+			return
+		}
 	}
 	c.Data(200, repo.IndexFileContentType, server.RepositoryIndex.Raw)
 }
 
 func (server *Server) getAllChartsRequestHandler(c *gin.Context) {
-	err := server.syncRepositoryIndex()
-	if err != nil {
-		c.JSON(500, errorResponse(err))
-		return
+	if server.CacheRefreshPeriod == 0 {
+		err := server.syncRepositoryIndex()
+		if err != nil {
+			c.JSON(500, errorResponse(err))
+			return
+		}
 	}
 	c.JSON(200, server.RepositoryIndex.Entries)
 }
 
 func (server *Server) getChartRequestHandler(c *gin.Context) {
 	name := c.Param("name")
-	err := server.syncRepositoryIndex()
-	if err != nil {
-		c.JSON(500, errorResponse(err))
-		return
+	if server.CacheRefreshPeriod == 0 {
+		err := server.syncRepositoryIndex()
+		if err != nil {
+			c.JSON(500, errorResponse(err))
+			return
+		}
 	}
 	chart := server.RepositoryIndex.Entries[name]
 	if chart == nil {
@@ -68,10 +74,12 @@ func (server *Server) getChartVersionRequestHandler(c *gin.Context) {
 	if version == "latest" {
 		version = ""
 	}
-	err := server.syncRepositoryIndex()
-	if err != nil {
-		c.JSON(500, errorResponse(err))
-		return
+	if server.CacheRefreshPeriod == 0 {
+		err := server.syncRepositoryIndex()
+		if err != nil {
+			c.JSON(500, errorResponse(err))
+			return
+		}
 	}
 	chartVersion, err := server.RepositoryIndex.Get(name, version)
 	if err != nil {
@@ -82,6 +90,15 @@ func (server *Server) getChartVersionRequestHandler(c *gin.Context) {
 }
 
 func (server *Server) deleteChartVersionRequestHandler(c *gin.Context) {
+	if server.CacheRefreshPeriod > 0 {
+		server.Logger.Debugw("Acquiring storage cache lock")
+		server.StorageCacheLock.Lock()
+		server.Logger.Debugw("Storage cache lock acquired")
+		defer func() {
+			server.Logger.Debugw("Releasing storage cache lock")
+			server.StorageCacheLock.Unlock()
+		}()
+	}
 	name := c.Param("name")
 	version := c.Param("version")
 	filename := repo.ChartPackageFilenameFromNameVersion(name, version)
@@ -95,6 +112,13 @@ func (server *Server) deleteChartVersionRequestHandler(c *gin.Context) {
 	}
 	provFilename := repo.ProvenanceFilenameFromNameVersion(name, version)
 	server.StorageBackend.DeleteObject(provFilename) // ignore error here, may be no prov file
+	if server.CacheRefreshPeriod > 0 {
+		err = server.removeChartPackage(filename)
+		if err != nil {
+			c.JSON(500, errorResponse(err))
+			return
+		}
+	}
 	c.JSON(200, objectDeletedResponse)
 }
 
@@ -144,6 +168,17 @@ func (server *Server) extractAndValidateFormFile(req *http.Request, field string
 }
 
 func (server *Server) postPackageAndProvenanceRequestHandler(c *gin.Context) {
+
+	if server.CacheRefreshPeriod > 0 {
+		server.Logger.Debugw("Acquiring storage cache lock")
+		server.StorageCacheLock.Lock()
+		server.Logger.Debugw("Storage cache lock acquired")
+		defer func() {
+			server.Logger.Debugw("Releasing storage cache lock")
+			server.StorageCacheLock.Unlock()
+		}()
+	}
+
 	var ppFiles []*packageOrProvenanceFile
 
 	type fieldFuncPair struct {
@@ -184,12 +219,24 @@ func (server *Server) postPackageAndProvenanceRequestHandler(c *gin.Context) {
 		err := server.StorageBackend.PutObject(ppf.filename, ppf.content)
 		if err == nil {
 			storedFiles = append(storedFiles, ppf)
-		} else {
+			if server.CacheRefreshPeriod > 0 {
+				if strings.HasSuffix(ppf.filename, repo.ChartPackageFileExtension) {
+					// This could probably be done more efficiently, e.g. by having PutObject
+					// return its object, but for the moment it will do
+					obj, err := server.StorageBackend.GetObject(ppf.filename)
+					if err == nil {
+						err = server.addChartPackage(obj)
+					}
+				}
+			}
+		}
+		if err != nil {
 			// Clean up what's already been saved
 			for _, ppf := range storedFiles {
 				server.StorageBackend.DeleteObject(ppf.filename)
 			}
 			c.JSON(500, errorResponse(err))
+			return
 		}
 	}
 	c.JSON(201, objectSavedResponse)
@@ -204,6 +251,15 @@ func (server *Server) postRequestHandler(c *gin.Context) {
 }
 
 func (server *Server) postPackageRequestHandler(c *gin.Context) {
+	if server.CacheRefreshPeriod > 0 {
+		server.Logger.Debugw("Acquiring storage cache lock")
+		server.StorageCacheLock.Lock()
+		server.Logger.Debugw("Storage cache lock acquired")
+		defer func() {
+			server.Logger.Debugw("Releasing storage cache lock")
+			server.StorageCacheLock.Unlock()
+		}()
+	}
 	content, err := c.GetRawData()
 	if err != nil {
 		c.JSON(500, errorResponse(err))
@@ -228,6 +284,18 @@ func (server *Server) postPackageRequestHandler(c *gin.Context) {
 	if err != nil {
 		c.JSON(500, errorResponse(err))
 		return
+	}
+	if server.CacheRefreshPeriod > 0 {
+		// This could probably be done more efficiently, e.g. by having PutObject
+		// return its object, but for the moment it will do
+		obj, err := server.StorageBackend.GetObject(filename)
+		if err == nil {
+			err = server.addChartPackage(obj)
+		}
+		if err != nil {
+			c.JSON(500, errorResponse(err))
+			return
+		}
 	}
 	c.JSON(201, objectSavedResponse)
 }

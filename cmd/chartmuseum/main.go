@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/chartmuseum/chartmuseum/pkg/chartmuseum"
 	"github.com/chartmuseum/chartmuseum/pkg/storage"
@@ -53,6 +54,7 @@ func cliHandler(c *cli.Context) {
 		StorageBackend:         backend,
 		ChartPostFormFieldName: c.String("chart-post-form-field-name"),
 		ProvPostFormFieldName:  c.String("prov-post-form-field-name"),
+		CacheRefreshPeriod:     c.Duration("cache-refresh-period"),
 	}
 
 	server, err := newServer(options)
@@ -63,6 +65,25 @@ func cliHandler(c *cli.Context) {
 	if c.Bool("gen-index") {
 		echo(string(server.RepositoryIndex.Raw[:]))
 		exit(0)
+	}
+
+	if options.CacheRefreshPeriod > 0 {
+		quit := make(chan struct{})
+		defer func() {
+			quit <- struct{}{}
+		}()
+		ticker := time.NewTicker(server.CacheRefreshPeriod)
+		go func() {
+			for {
+				select {
+				case <-ticker.C:
+					server.Update()
+				case <-quit:
+					ticker.Stop()
+					return
+				}
+			}
+		}()
 	}
 
 	server.Listen(c.Int("port"))
@@ -242,5 +263,11 @@ var cliFlags = []cli.Flag{
 		Value:  "prov",
 		Usage:  "form field which will be queried for the provenance file content",
 		EnvVar: "PROV_POST_FORM_FIELD_NAME",
+	},
+	cli.DurationFlag{
+		Name:   "cache-refresh-period",
+		Value:  time.Second * 0,
+		Usage:  "period of time between cache refresh",
+		EnvVar: "CACHE_REFRESH_PERIOD",
 	},
 }

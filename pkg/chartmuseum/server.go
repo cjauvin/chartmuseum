@@ -40,6 +40,7 @@ type (
 		TlsKey                 string
 		ChartPostFormFieldName string
 		ProvPostFormFieldName  string
+		CacheRefreshPeriod     time.Duration
 	}
 
 	// ServerOptions are options for constructing a Server
@@ -57,6 +58,7 @@ type (
 		Password               string
 		ChartPostFormFieldName string
 		ProvPostFormFieldName  string
+		CacheRefreshPeriod     time.Duration
 	}
 )
 
@@ -113,6 +115,7 @@ func NewRouter(logger *Logger, username string, password string, enableMetrics b
 
 // NewServer creates a new Server instance
 func NewServer(options ServerOptions) (*Server, error) {
+
 	logger, err := NewLogger(options.LogJSON, options.Debug)
 	if err != nil {
 		return new(Server), nil
@@ -132,11 +135,13 @@ func NewServer(options ServerOptions) (*Server, error) {
 		TlsKey:                 options.TlsKey,
 		ChartPostFormFieldName: options.ChartPostFormFieldName,
 		ProvPostFormFieldName:  options.ProvPostFormFieldName,
+		CacheRefreshPeriod:     options.CacheRefreshPeriod,
 	}
 
 	server.setRoutes(options.EnableAPI)
 
 	err = server.regenerateRepositoryIndex()
+
 	return server, err
 }
 
@@ -150,6 +155,10 @@ func (server *Server) Listen(port int) {
 	} else {
 		server.Logger.Fatal(server.Router.Run(fmt.Sprintf(":%d", port)))
 	}
+}
+
+func (server *Server) Update() {
+	server.regenerateRepositoryIndex()
 }
 
 func loggingMiddleware(logger *Logger) gin.HandlerFunc {
@@ -274,6 +283,39 @@ func (server *Server) removeIndexObject(index *repo.Index, object storage.Object
 	return nil
 }
 
+// Remove chart from both cache and index
+func (server *Server) removeChartPackage(filename string) error {
+	obj := storage.Object{}
+	idx := -1
+	for i, o := range server.StorageCache {
+		if o.Path == filename {
+			obj = o
+			idx = i
+			break
+		}
+	}
+	if idx >= 0 {
+		err := server.removeIndexObject(server.RepositoryIndex, obj)
+		if err != nil {
+			return err
+		}
+		server.StorageCache = append(server.StorageCache[:idx], server.StorageCache[idx+1:]...)
+		return nil
+	}
+	return fmt.Errorf("chart with filename '%s' not found", filename)
+}
+
+func (server *Server) addChartPackage(object storage.Object) error {
+	server.StorageCache = append(server.StorageCache, object)
+	chartVersion, err := server.getObjectChartVersion(object, false)
+	if err != nil {
+		err = server.checkInvalidChartPackageError(object, err, "added")
+		return err
+	}
+	server.RepositoryIndex.AddEntry(chartVersion)
+	return nil
+}
+
 func (server *Server) updateIndexObject(index *repo.Index, object storage.Object) error {
 	chartVersion, err := server.getObjectChartVersion(object, true)
 	if err != nil {
@@ -356,4 +398,13 @@ func (server *Server) checkInvalidChartPackageError(object storage.Object, err e
 		return nil
 	}
 	return err
+}
+
+func (server *Server) findObject(filename string) (storage.Object, error) {
+	for _, o := range server.StorageCache {
+		if o.Path == filename {
+			return o, nil
+		}
+	}
+	return storage.Object{}, fmt.Errorf("object with filename '%s' not found", filename)
 }

@@ -25,14 +25,15 @@ var testProvfilePath = "../../testdata/charts/mychart/mychart-0.1.0.tgz.prov"
 
 type ServerTestSuite struct {
 	suite.Suite
-	Server               *Server
-	DisabledAPIServer    *Server
-	BrokenServer         *Server
-	OverwriteServer      *Server
-	TempDirectory        string
-	BrokenTempDirectory  string
-	TestTarballFilename  string
-	TestProvfileFilename string
+	Server                          *Server
+	DisabledAPIServer               *Server
+	BrokenServer                    *Server
+	OverwriteServer                 *Server
+	NonZeroCacheRefreshPeriodServer *Server
+	TempDirectory                   string
+	BrokenTempDirectory             string
+	TestTarballFilename             string
+	TestProvfileFilename            string
 }
 
 func (suite *ServerTestSuite) doRequest(stype string, method string, urlStr string, body io.Reader, contentType string) gin.ResponseWriter {
@@ -52,6 +53,9 @@ func (suite *ServerTestSuite) doRequest(stype string, method string, urlStr stri
 		suite.DisabledAPIServer.Router.HandleContext(c)
 	case "overwrite":
 		suite.OverwriteServer.Router.HandleContext(c)
+	case "non-zero-cache-refresh-period":
+		c.Request.SetBasicAuth("user", "pass")
+		suite.NonZeroCacheRefreshPeriodServer.Router.HandleContext(c)
 	}
 
 	return c.Writer
@@ -70,29 +74,6 @@ func (suite *ServerTestSuite) SetupSuite() {
 	suite.TempDirectory = fmt.Sprintf("../../.test/chartmuseum-server/%s", timestamp)
 
 	backend := storage.Backend(storage.NewLocalFilesystemBackend(suite.TempDirectory))
-
-	server, err := NewServer(ServerOptions{backend, false, false, true, false, false, "", "", "", "", "", "", ""})
-	suite.NotNil(server)
-	suite.Nil(err, "no error creating new server, logJson=false, debug=false, disabled=false, overwrite=false")
-
-	server, err = NewServer(ServerOptions{backend, true, true, true, false, false, "", "", "", "", "", "", ""})
-	suite.NotNil(server)
-	suite.Nil(err, "no error creating new server, logJson=true, debug=true, disabled=false, overwrite=false")
-
-	server, err = NewServer(ServerOptions{backend, false, true, true, false, false, "", "", "", "user", "pass", "chart", "prov"})
-	suite.Nil(err, "no error creating new server, logJson=false, debug=true, disabled=false, overwrite=false")
-
-	suite.Server = server
-
-	disabledAPIServer, err := NewServer(ServerOptions{backend, false, true, false, false, false, "", "", "", "", "", "", ""})
-	suite.Nil(err, "no error creating new server, logJson=false, debug=true, disabled=true, overwrite=false")
-
-	suite.DisabledAPIServer = disabledAPIServer
-
-	overwriteServer, err := NewServer(ServerOptions{backend, false, true, true, true, false, "", "", "", "", "", "chart", "prov"})
-	suite.Nil(err, "no error creating new server, logJson=false, debug=true, disabled=false, overwrite=true")
-
-	suite.OverwriteServer = overwriteServer
 
 	suite.TestTarballFilename = pathutil.Join(suite.TempDirectory, "mychart-0.1.0.tgz")
 	destFileTarball, err := os.Create(suite.TestTarballFilename)
@@ -116,11 +97,39 @@ func (suite *ServerTestSuite) SetupSuite() {
 	err = destFileProvfile.Sync()
 	suite.Nil(err, "no error syncing temp provenance file")
 
+	server, err := NewServer(ServerOptions{backend, false, false, true, false, false, "", "", "", "", "", "", "", 0})
+	suite.NotNil(server)
+	suite.Nil(err, "no error creating new server, logJson=false, debug=false, disabled=false, overwrite=false")
+
+	server, err = NewServer(ServerOptions{backend, true, true, true, false, false, "", "", "", "", "", "", "", 0})
+	suite.NotNil(server)
+	suite.Nil(err, "no error creating new server, logJson=true, debug=true, disabled=false, overwrite=false")
+
+	server, err = NewServer(ServerOptions{backend, false, true, true, false, false, "", "", "", "user", "pass", "chart", "prov", 0})
+	suite.Nil(err, "no error creating new server, logJson=false, debug=true, disabled=false, overwrite=false")
+
+	suite.Server = server
+
+	disabledAPIServer, err := NewServer(ServerOptions{backend, false, true, false, false, false, "", "", "", "", "", "", "", 0})
+	suite.Nil(err, "no error creating new server, logJson=false, debug=true, disabled=true, overwrite=false")
+
+	suite.DisabledAPIServer = disabledAPIServer
+
+	overwriteServer, err := NewServer(ServerOptions{backend, false, true, true, true, false, "", "", "", "", "", "chart", "prov", 0})
+	suite.Nil(err, "no error creating new server, logJson=false, debug=true, disabled=false, overwrite=true")
+
+	suite.OverwriteServer = overwriteServer
+
+	nzcpServer, err := NewServer(ServerOptions{backend, false, true, true, false, false, "", "", "", "user", "pass", "chart", "prov", 1})
+	suite.Nil(err, "no error creating new server, logJson=false, debug=true, disabled=false, overwrite=false")
+
+	suite.NonZeroCacheRefreshPeriodServer = nzcpServer
+
 	suite.BrokenTempDirectory = fmt.Sprintf("../../.test/chartmuseum-server/%s-broken", timestamp)
 	defer os.RemoveAll(suite.BrokenTempDirectory)
 
 	brokenBackend := storage.Backend(storage.NewLocalFilesystemBackend(suite.BrokenTempDirectory))
-	brokenServer, err := NewServer(ServerOptions{brokenBackend, false, true, true, false, false, "", "", "", "", "", "", ""})
+	brokenServer, err := NewServer(ServerOptions{brokenBackend, false, true, true, false, false, "", "", "", "", "", "", "", 0})
 	suite.Nil(err, "no error creating new server, logJson=false, debug=true, disabled=false, overwrite=false")
 
 	suite.BrokenServer = brokenServer
@@ -358,6 +367,61 @@ func (suite *ServerTestSuite) TestRoutes() {
 	buf, w = suite.getBodyWithMultipartFormFiles([]string{"chart", "prov"}, []string{testTarballPath, testProvfilePath})
 	res = suite.doRequest("overwrite", "POST", "/api/charts", buf, w.FormDataContentType())
 	suite.Equal(201, res.Status(), "201 POST /api/charts")
+
+	// Test non-zero cache refresh period server
+
+	res = suite.doRequest("non-zero-cache-refresh-period", "GET", "/charts/mychart-0.1.0.tgz", nil, "")
+	suite.Equal(200, res.Status(), "200 GET /charts/mychart-0.1.0.tgz")
+
+	res = suite.doRequest("non-zero-cache-refresh-period", "GET", "/api/charts", nil, "")
+	suite.Equal(200, res.Status(), "200 GET /api/charts")
+
+	res = suite.doRequest("non-zero-cache-refresh-period", "GET", "/api/charts/mychart", nil, "")
+	suite.Equal(200, res.Status(), "200 GET /api/charts/mychart")
+
+	res = suite.doRequest("non-zero-cache-refresh-period", "GET", "/api/charts/mychart/0.1.0", nil, "")
+	suite.Equal(200, res.Status(), "200 GET /api/charts/mychart/0.1.0")
+
+	res = suite.doRequest("non-zero-cache-refresh-period", "GET", "/index.yaml", nil, "")
+	suite.Equal(200, res.Status(), "200 GET /index.yaml")
+
+	// Clear test repo to allow uploading again
+	res = suite.doRequest("non-zero-cache-refresh-period", "DELETE", "/api/charts/mychart/0.1.0", nil, "")
+	suite.Equal(200, res.Status(), "200 DELETE /api/charts/mychart/0.1.0")
+
+	//// Create form file with chart=@mychart-0.1.0.tgz
+	buf, w = suite.getBodyWithMultipartFormFiles([]string{"chart"}, []string{testTarballPath})
+	res = suite.doRequest("non-zero-cache-refresh-period", "POST", "/api/charts", buf, w.FormDataContentType())
+	suite.Equal(201, res.Status(), "201 POST /api/charts")
+
+	// Clear test repo to allow uploading again
+	res = suite.doRequest("non-zero-cache-refresh-period", "DELETE", "/api/charts/mychart/0.1.0", nil, "")
+	suite.Equal(200, res.Status(), "200 DELETE /api/charts/mychart/0.1.0")
+
+	// POST /api/charts
+	content, err = ioutil.ReadFile(testTarballPath)
+	suite.Nil(err, "no error opening test tarball")
+
+	body = bytes.NewBuffer(content)
+	res = suite.doRequest("non-zero-cache-refresh-period", "POST", "/api/charts", body, "")
+	suite.Equal(201, res.Status(), "201 POST /api/charts")
+
+	body = bytes.NewBuffer(content)
+	res = suite.doRequest("non-zero-cache-refresh-period", "POST", "/api/charts", body, "")
+	suite.Equal(500, res.Status(), "500 POST /api/charts")
+
+	// POST /api/prov
+	content, err = ioutil.ReadFile(testProvfilePath)
+	suite.Nil(err, "no error opening test provenance file")
+
+	body = bytes.NewBuffer(content)
+	res = suite.doRequest("non-zero-cache-refresh-period", "POST", "/api/prov", body, "")
+	suite.Equal(201, res.Status(), "201 POST /api/prov")
+
+	body = bytes.NewBuffer(content)
+	res = suite.doRequest("non-zero-cache-refresh-period", "POST", "/api/prov", body, "")
+	suite.Equal(500, res.Status(), "500 POST /api/prov")
+
 }
 
 func (suite *ServerTestSuite) getBodyWithMultipartFormFiles(fields []string, filenames []string) (io.Reader, *multipart.Writer) {
