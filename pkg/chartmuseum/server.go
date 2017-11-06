@@ -1,6 +1,7 @@
 package chartmuseum
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"sync"
@@ -296,31 +297,48 @@ func (server *Server) addIndexObjectsAsync(index *repo.Index, objects []storage.
 	server.Logger.Debugw("Loading charts packages from storage (this could take awhile)",
 		"total", numObjects,
 	)
-	var err error
-	loaded := make([]*helm_repo.ChartVersion, numObjects)
 
 	var wg sync.WaitGroup
 	wg.Add(numObjects)
+
+	var firstErr error          // Will crash if not nil at end of WaitGroup
+	var firstErrLock sync.Mutex // Make sure that firstErr is atomically assigned
+
+	loaded := make([]*helm_repo.ChartVersion, numObjects)
+
+	// Provide a mechanism to short-circuit object downloads in case of error
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	for idx, object := range objects {
 		go func(i int, o storage.Object) {
 			defer wg.Done()
-			if err == nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
 				chartVersion, err := server.getObjectChartVersion(o, true)
+				// Nilify error if it is simply an invalid chart
+				err = server.checkInvalidChartPackageError(o, err, "added")
+				firstErrLock.Lock()
 				if err != nil {
-					err = server.checkInvalidChartPackageError(o, err, "added")
+					firstErr = err // Other-than-invalid error, will crash when the WaitGroup is done
+					cancel()
 				} else {
 					loaded[i] = chartVersion
 				}
+				firstErrLock.Unlock()
 			}
 		}(idx, object)
 	}
 	wg.Wait()
-	if err != nil {
-		return err
+	if firstErr != nil {
+		return firstErr
 	}
 
 	for _, chartVersion := range loaded {
 		if chartVersion == nil {
+			// This should correspond to invalid errors logged above
 			continue
 		}
 		server.Logger.Debugw("Adding chart to index",
